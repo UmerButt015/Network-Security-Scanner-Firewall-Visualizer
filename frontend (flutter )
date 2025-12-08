@@ -1,0 +1,1171 @@
+// main.dart - Updated with Flexible Port Input
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'dart:async';
+
+void main() {
+  runApp(const NetworkScannerApp());
+}
+
+class NetworkScannerApp extends StatelessWidget {
+  const NetworkScannerApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Advanced Network Scanner',
+      theme: ThemeData.dark(),
+      home: const HomePage(),
+    );
+  }
+}
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  int _selectedIndex = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Advanced Network Scanner'),
+        backgroundColor: Colors.blueGrey[900],
+      ),
+      body: IndexedStack(
+        index: _selectedIndex,
+        children: const [ScannerScreen(), FirewallScreen(), VisualizerScreen()],
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        backgroundColor: Colors.blueGrey[900],
+        selectedItemColor: Colors.cyanAccent,
+        unselectedItemColor: Colors.grey,
+        currentIndex: _selectedIndex,
+        onTap: (index) => setState(() => _selectedIndex = index),
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.scanner), label: 'Scanner'),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.security),
+            label: 'Firewall',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.analytics),
+            label: 'Visualizer',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ==================== UPDATED Scanner Screen ====================
+class ScannerScreen extends StatefulWidget {
+  const ScannerScreen({super.key});
+
+  @override
+  State<ScannerScreen> createState() => _ScannerScreenState();
+}
+
+class _ScannerScreenState extends State<ScannerScreen> {
+  final TextEditingController _targetController = TextEditingController(
+    text: '127.0.0.1',
+  );
+  final TextEditingController _portsController = TextEditingController(
+    text: '80,443,22',
+  );
+  String _scanType = 'tcp-connect';
+  List<Map<String, dynamic>> _results = [];
+  bool _isScanning = false;
+  String? _scanId;
+  Timer? _pollTimer;
+
+  // Port examples for quick selection
+  final List<Map<String, String>> _portExamples = [
+    {'name': 'Common Web', 'ports': '80,443,8080,8443'},
+    {'name': 'Common Services', 'ports': '21,22,23,25,53,110,143'},
+    {'name': 'Database', 'ports': '1433,3306,5432,27017,6379'},
+    {'name': 'Remote Access', 'ports': '22,23,3389,5900,5901'},
+    {'name': 'Range 1-100', 'ports': '1-100'},
+    {'name': 'All Ports', 'ports': 'all'},
+    {'name': 'Custom', 'ports': ''},
+  ];
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
+  void _showSnackBar(String message, {bool isError = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isError ? Colors.red : Colors.green,
+      ),
+    );
+  }
+
+  Future<void> _startScan() async {
+    if (_targetController.text.isEmpty) {
+      _showSnackBar('Please enter target IP', isError: true);
+      return;
+    }
+
+    if (_portsController.text.isEmpty) {
+      _showSnackBar('Please enter ports to scan', isError: true);
+      return;
+    }
+
+    setState(() {
+      _isScanning = true;
+      _results.clear();
+    });
+
+    try {
+      final response = await http.post(
+        Uri.parse('http://localhost:8000/api/scan/start'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'target': _targetController.text,
+          'ports': _portsController.text,
+          'scan_type': _scanType,
+          'timeout_ms': 2000,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        _scanId = data['scan_id'];
+        _startPolling();
+        _showSnackBar('Scan started! Scanning ${data['total_ports']} ports');
+      } else {
+        final errorData = jsonDecode(response.body);
+        _showSnackBar(
+          'Error: ${errorData['detail']['message'] ?? response.statusCode}',
+          isError: true,
+        );
+        setState(() => _isScanning = false);
+      }
+    } catch (e) {
+      _showSnackBar('Error: $e', isError: true);
+      setState(() => _isScanning = false);
+    }
+  }
+
+  void _startPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
+      if (_scanId == null) {
+        timer.cancel();
+        return;
+      }
+
+      try {
+        final response = await http.get(
+          Uri.parse('http://localhost:8000/api/scan/results/$_scanId'),
+        );
+
+        if (response.statusCode == 200) {
+          final data = jsonDecode(response.body);
+
+          if (data['error'] != null) {
+            timer.cancel();
+            _showSnackBar('Scan error: ${data['error']}', isError: true);
+            setState(() => _isScanning = false);
+            return;
+          }
+
+          if (data['complete'] == true) {
+            timer.cancel();
+            setState(() => _isScanning = false);
+            _showSnackBar(
+              'Scan completed! Found ${data['open_ports']} open ports',
+            );
+            return;
+          }
+
+          if (data['results'] != null) {
+            setState(() {
+              _results = List<Map<String, dynamic>>.from(data['results']);
+            });
+          }
+        }
+      } catch (e) {
+        // Ignore polling errors
+      }
+    });
+  }
+
+  Future<void> _cancelScan() async {
+    if (_scanId == null) return;
+
+    try {
+      await http.post(
+        Uri.parse('http://localhost:8000/api/scan/cancel/$_scanId'),
+      );
+      _pollTimer?.cancel();
+      setState(() {
+        _isScanning = false;
+        _scanId = null;
+      });
+      _showSnackBar('Scan cancelled');
+    } catch (e) {
+      _showSnackBar('Error cancelling scan: $e', isError: true);
+    }
+  }
+
+  void _selectPortExample(String ports) {
+    if (ports.isEmpty) {
+      _portsController.text = '';
+      _portsController.selection = TextSelection.fromPosition(
+        TextPosition(offset: _portsController.text.length),
+      );
+    } else {
+      _portsController.text = ports;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        children: [
+          // Scanner Controls
+          Card(
+            color: Colors.grey[900],
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  // Target IP
+                  TextField(
+                    controller: _targetController,
+                    decoration: InputDecoration(
+                      labelText: 'Target IP / Hostname',
+                      border: const OutlineInputBorder(),
+                      filled: true,
+                      fillColor: Colors.grey[800],
+                      prefixIcon: const Icon(Icons.computer),
+                    ),
+                  ),
+
+                  const SizedBox(height: 15),
+
+                  // Ports Input
+                  TextField(
+                    controller: _portsController,
+                    decoration: InputDecoration(
+                      labelText: 'Ports to Scan',
+                      hintText: 'e.g., 80,443,22 or 20-30 or all',
+                      border: const OutlineInputBorder(),
+                      filled: true,
+                      fillColor: Colors.grey[800],
+                      prefixIcon: const Icon(Icons.numbers),
+                      suffixIcon: PopupMenuButton<String>(
+                        icon: const Icon(Icons.arrow_drop_down),
+                        onSelected: _selectPortExample,
+                        itemBuilder: (context) {
+                          return _portExamples.map((example) {
+                            return PopupMenuItem<String>(
+                              value: example['ports']!,
+                              child: Text(example['name']!),
+                            );
+                          }).toList();
+                        },
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 10),
+
+                  // Quick Port Buttons
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children:
+                          _portExamples.map((example) {
+                            if (example['name'] == 'Custom')
+                              return const SizedBox();
+
+                            return Padding(
+                              padding: const EdgeInsets.only(right: 8.0),
+                              child: FilterChip(
+                                label: Text(example['name']!),
+                                onSelected:
+                                    (_) =>
+                                        _selectPortExample(example['ports']!),
+                                backgroundColor: Colors.grey[800],
+                                selectedColor: Colors.cyan,
+                              ),
+                            );
+                          }).toList(),
+                    ),
+                  ),
+
+                  const SizedBox(height: 15),
+
+                  // Scan Type
+                  DropdownButtonFormField<String>(
+                    value: _scanType,
+                    decoration: InputDecoration(
+                      labelText: 'Scan Type',
+                      border: const OutlineInputBorder(),
+                      filled: true,
+                      fillColor: Colors.grey[800],
+                      prefixIcon: const Icon(Icons.list),
+                    ),
+                    items:
+                        [
+                          'tcp-connect',
+                          'udp',
+                          if (true) 'syn(nmap)', // Show if nmap available
+                        ].map((type) {
+                          return DropdownMenuItem(
+                            value: type,
+                            child: Text(type),
+                          );
+                        }).toList(),
+                    onChanged:
+                        _isScanning
+                            ? null
+                            : (value) {
+                              if (value != null) {
+                                setState(() => _scanType = value);
+                              }
+                            },
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  // Action Buttons
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: _isScanning ? null : _startScan,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.cyan,
+                            foregroundColor: Colors.black,
+                            padding: const EdgeInsets.symmetric(vertical: 15),
+                          ),
+                          child:
+                              _isScanning
+                                  ? const Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      SizedBox(
+                                        width: 20,
+                                        height: 20,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.black,
+                                        ),
+                                      ),
+                                      SizedBox(width: 10),
+                                      Text('Scanning...'),
+                                    ],
+                                  )
+                                  : const Text('Start Scan'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: _isScanning ? _cancelScan : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.red,
+                            padding: const EdgeInsets.symmetric(vertical: 15),
+                          ),
+                          child: const Text('Cancel'),
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  // Port Format Examples
+                  const SizedBox(height: 15),
+                  const Text(
+                    'Port Examples: 80,443,22 or 20-30 or 80,443,20-25,8080 or "all"',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
+          // Results Section
+          Expanded(
+            child: Card(
+              color: Colors.grey[900],
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          'Scan Results',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.cyanAccent,
+                          ),
+                        ),
+                        Text(
+                          'Scanned: ${_results.length}',
+                          style: const TextStyle(color: Colors.grey),
+                        ),
+                      ],
+                    ),
+
+                    // Open Ports Summary
+                    if (_results.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8.0),
+                        child: Row(
+                          children: [
+                            Chip(
+                              label: Text(
+                                'Open: ${_results.where((r) => r["status"] == "open" || (r["status"]?.toString().contains("open") ?? false)).length}',
+                              ),
+                              backgroundColor: Colors.green.withOpacity(0.2),
+                              labelStyle: const TextStyle(color: Colors.green),
+                            ),
+                            const SizedBox(width: 10),
+                            Chip(
+                              label: Text(
+                                'Closed: ${_results.where((r) => r["status"] == "closed").length}',
+                              ),
+                              backgroundColor: Colors.red.withOpacity(0.2),
+                              labelStyle: const TextStyle(color: Colors.red),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                    const SizedBox(height: 10),
+
+                    Expanded(
+                      child:
+                          _results.isEmpty
+                              ? Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      _isScanning
+                                          ? Icons.search
+                                          : Icons.dashboard,
+                                      size: 64,
+                                      color: Colors.grey[600],
+                                    ),
+                                    const SizedBox(height: 16),
+                                    Text(
+                                      _isScanning
+                                          ? 'Scanning in progress...'
+                                          : 'No results yet',
+                                      style: TextStyle(color: Colors.grey[600]),
+                                    ),
+                                    if (!_isScanning) ...[
+                                      const SizedBox(height: 10),
+                                      const Text(
+                                        'Enter ports above and click Start Scan',
+                                        style: TextStyle(
+                                          color: Colors.grey,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              )
+                              : ListView.builder(
+                                itemCount: _results.length,
+                                itemBuilder: (context, index) {
+                                  final result = _results[index];
+                                  final isOpen =
+                                      result['status'] == 'open' ||
+                                      (result['status']?.toString().contains(
+                                            'open',
+                                          ) ??
+                                          false);
+
+                                  return Card(
+                                    margin: const EdgeInsets.symmetric(
+                                      vertical: 4,
+                                    ),
+                                    color: Colors.grey[800],
+                                    child: ListTile(
+                                      leading: CircleAvatar(
+                                        backgroundColor:
+                                            isOpen ? Colors.green : Colors.red,
+                                        child: Text(
+                                          result['port'].toString(),
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                      ),
+                                      title: Text(
+                                        'Port ${result['port']}',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                      subtitle: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            'Service: ${result['service'] ?? 'Unknown'}',
+                                            style: const TextStyle(
+                                              color: Colors.grey,
+                                            ),
+                                          ),
+                                          if (result['rtt_ms'] != null)
+                                            Text(
+                                              'RTT: ${result['rtt_ms']} ms',
+                                              style: const TextStyle(
+                                                color: Colors.grey,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                      trailing: Chip(
+                                        label: Text(
+                                          result['status'] ?? 'unknown',
+                                          style: TextStyle(
+                                            color:
+                                                isOpen
+                                                    ? Colors.green
+                                                    : Colors.red,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                        backgroundColor:
+                                            isOpen
+                                                ? Colors.green.withOpacity(0.2)
+                                                : Colors.red.withOpacity(0.2),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 8,
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ==================== Firewall Screen (No Changes Needed) ====================
+class FirewallScreen extends StatefulWidget {
+  const FirewallScreen({super.key});
+
+  @override
+  State<FirewallScreen> createState() => _FirewallScreenState();
+}
+
+class _FirewallScreenState extends State<FirewallScreen> {
+  List<dynamic> _rules = [];
+  final TextEditingController _ipController = TextEditingController(
+    text: 'any',
+  );
+  final TextEditingController _portController = TextEditingController(
+    text: 'any',
+  );
+  final TextEditingController _priorityController = TextEditingController(
+    text: '100',
+  );
+  final TextEditingController _testIpController = TextEditingController(
+    text: '127.0.0.1',
+  );
+  final TextEditingController _testPortController = TextEditingController(
+    text: '80',
+  );
+  String _selectedAction = 'deny';
+  String _selectedProtocol = 'any';
+  String _selectedTestProtocol = 'tcp';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadRules();
+  }
+
+  Future<void> _loadRules() async {
+    try {
+      final response = await http.get(
+        Uri.parse('http://localhost:8000/api/firewall/rules'),
+      );
+
+      if (response.statusCode == 200) {
+        setState(() {
+          _rules = jsonDecode(response.body);
+        });
+      } else {
+        _showMessage('Failed to load rules: ${response.statusCode}');
+      }
+    } catch (e) {
+      _showMessage('Error: $e');
+    }
+  }
+
+  Future<void> _addRule() async {
+    try {
+      final response = await http.post(
+        Uri.parse('http://localhost:8000/api/firewall/rules'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'action': _selectedAction,
+          'ip': _ipController.text,
+          'port': _portController.text,
+          'protocol': _selectedProtocol,
+          'priority': int.tryParse(_priorityController.text) ?? 100,
+          'note': '',
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        _showMessage('Rule added successfully');
+        _loadRules();
+        _ipController.text = 'any';
+        _portController.text = 'any';
+        _priorityController.text = '100';
+      } else {
+        _showMessage('Failed to add rule: ${response.statusCode}');
+      }
+    } catch (e) {
+      _showMessage('Error: $e');
+    }
+  }
+
+  Future<void> _deleteRule(int ruleId) async {
+    try {
+      final response = await http.delete(
+        Uri.parse('http://localhost:8000/api/firewall/rules/$ruleId'),
+      );
+
+      if (response.statusCode == 200) {
+        _showMessage('Rule deleted');
+        _loadRules();
+      } else {
+        _showMessage('Failed to delete rule');
+      }
+    } catch (e) {
+      _showMessage('Error: $e');
+    }
+  }
+
+  Future<void> _testPacket() async {
+    try {
+      final response = await http.post(
+        Uri.parse('http://localhost:8000/api/firewall/test'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'ip': _testIpController.text,
+          'port': int.tryParse(_testPortController.text) ?? 80,
+          'protocol': _selectedTestProtocol,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final result = jsonDecode(response.body);
+        showDialog(
+          context: context,
+          builder:
+              (context) => AlertDialog(
+                title: const Text('Test Result'),
+                backgroundColor: Colors.grey[900],
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Action: ${result['action']?.toString().toUpperCase()}',
+                      style: TextStyle(
+                        color:
+                            result['action'] == 'allow'
+                                ? Colors.green
+                                : Colors.red,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    if (result['rule'] != null) ...[
+                      const SizedBox(height: 10),
+                      const Divider(color: Colors.grey),
+                      const SizedBox(height: 10),
+                      Text('Matched Rule #${result['rule']['id']}'),
+                      Text('Priority: ${result['rule']['priority']}'),
+                    ],
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('OK'),
+                  ),
+                ],
+              ),
+        );
+      } else {
+        _showMessage('Test failed: ${response.statusCode}');
+      }
+    } catch (e) {
+      _showMessage('Error: $e');
+    }
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: Colors.blue),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        children: [
+          // Add Rule Card
+          Card(
+            color: Colors.grey[900],
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  const Text(
+                    'Add Firewall Rule',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.cyanAccent,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  DropdownButtonFormField<String>(
+                    value: _selectedAction,
+                    decoration: InputDecoration(
+                      labelText: 'Action',
+                      border: const OutlineInputBorder(),
+                      filled: true,
+                      fillColor: Colors.grey[800],
+                    ),
+                    items:
+                        ['allow', 'deny'].map((action) {
+                          return DropdownMenuItem(
+                            value: action,
+                            child: Text(
+                              action.toUpperCase(),
+                              style: TextStyle(
+                                color:
+                                    action == 'allow'
+                                        ? Colors.green
+                                        : Colors.red,
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                    onChanged: (value) {
+                      if (value != null)
+                        setState(() => _selectedAction = value);
+                    },
+                  ),
+
+                  const SizedBox(height: 10),
+
+                  TextField(
+                    controller: _ipController,
+                    decoration: InputDecoration(
+                      labelText: 'IP/CIDR/Range (e.g., 192.168.1.0/24)',
+                      border: const OutlineInputBorder(),
+                      filled: true,
+                      fillColor: Colors.grey[800],
+                    ),
+                  ),
+
+                  const SizedBox(height: 10),
+
+                  TextField(
+                    controller: _portController,
+                    decoration: InputDecoration(
+                      labelText: 'Port(s) (e.g., 80, 1-1024, any)',
+                      border: const OutlineInputBorder(),
+                      filled: true,
+                      fillColor: Colors.grey[800],
+                    ),
+                  ),
+
+                  const SizedBox(height: 10),
+
+                  DropdownButtonFormField<String>(
+                    value: _selectedProtocol,
+                    decoration: InputDecoration(
+                      labelText: 'Protocol',
+                      border: const OutlineInputBorder(),
+                      filled: true,
+                      fillColor: Colors.grey[800],
+                    ),
+                    items:
+                        ['any', 'tcp', 'udp'].map((proto) {
+                          return DropdownMenuItem(
+                            value: proto,
+                            child: Text(proto.toUpperCase()),
+                          );
+                        }).toList(),
+                    onChanged: (value) {
+                      if (value != null)
+                        setState(() => _selectedProtocol = value);
+                    },
+                  ),
+
+                  const SizedBox(height: 10),
+
+                  TextField(
+                    controller: _priorityController,
+                    decoration: InputDecoration(
+                      labelText: 'Priority (1-1000)',
+                      border: const OutlineInputBorder(),
+                      filled: true,
+                      fillColor: Colors.grey[800],
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  ElevatedButton(
+                    onPressed: _addRule,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.cyan,
+                      foregroundColor: Colors.black,
+                      minimumSize: const Size(double.infinity, 50),
+                    ),
+                    child: const Text('Add Rule'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
+          // Rules List Card
+          Card(
+            color: Colors.grey[900],
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Firewall Rules (${_rules.length})',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.cyanAccent,
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: _loadRules,
+                        icon: const Icon(
+                          Icons.refresh,
+                          color: Colors.cyanAccent,
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 10),
+
+                  if (_rules.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.all(20.0),
+                      child: Center(
+                        child: Text(
+                          'No firewall rules configured',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      ),
+                    )
+                  else
+                    ..._rules.map((rule) {
+                      return Card(
+                        margin: const EdgeInsets.symmetric(vertical: 4),
+                        color:
+                            rule['action'] == 'allow'
+                                ? Colors.green.withOpacity(0.1)
+                                : Colors.red.withOpacity(0.1),
+                        child: ListTile(
+                          leading: CircleAvatar(
+                            backgroundColor:
+                                rule['action'] == 'allow'
+                                    ? Colors.green
+                                    : Colors.red,
+                            child: Text(
+                              rule['id'].toString(),
+                              style: const TextStyle(color: Colors.white),
+                            ),
+                          ),
+                          title: Text(
+                            '${rule['action'].toUpperCase()} ${rule['protocol']} traffic',
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                          subtitle: Text(
+                            '${rule['ip']}:${rule['port']} (Priority: ${rule['priority']})',
+                            style: const TextStyle(color: Colors.grey),
+                          ),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete, color: Colors.red),
+                            onPressed: () => _deleteRule(rule['id']),
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
+          // Test Packet Card
+          Card(
+            color: Colors.grey[900],
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  const Text(
+                    'Test Packet',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.cyanAccent,
+                    ),
+                  ),
+
+                  const SizedBox(height: 16),
+
+                  TextField(
+                    controller: _testIpController,
+                    decoration: InputDecoration(
+                      labelText: 'Test IP',
+                      border: const OutlineInputBorder(),
+                      filled: true,
+                      fillColor: Colors.grey[800],
+                    ),
+                  ),
+
+                  const SizedBox(height: 10),
+
+                  TextField(
+                    controller: _testPortController,
+                    decoration: InputDecoration(
+                      labelText: 'Test Port',
+                      border: const OutlineInputBorder(),
+                      filled: true,
+                      fillColor: Colors.grey[800],
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+
+                  const SizedBox(height: 10),
+
+                  DropdownButtonFormField<String>(
+                    value: _selectedTestProtocol,
+                    decoration: InputDecoration(
+                      labelText: 'Protocol',
+                      border: const OutlineInputBorder(),
+                      filled: true,
+                      fillColor: Colors.grey[800],
+                    ),
+                    items:
+                        ['tcp', 'udp'].map((proto) {
+                          return DropdownMenuItem(
+                            value: proto,
+                            child: Text(proto.toUpperCase()),
+                          );
+                        }).toList(),
+                    onChanged: (value) {
+                      if (value != null)
+                        setState(() => _selectedTestProtocol = value);
+                    },
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  ElevatedButton(
+                    onPressed: _testPacket,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green,
+                      minimumSize: const Size(double.infinity, 50),
+                    ),
+                    child: const Text('Test Packet'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ==================== Visualizer Screen (No Changes Needed) ====================
+class VisualizerScreen extends StatefulWidget {
+  const VisualizerScreen({super.key});
+
+  @override
+  State<VisualizerScreen> createState() => _VisualizerScreenState();
+}
+
+class _VisualizerScreenState extends State<VisualizerScreen> {
+  String? _visualizationImage;
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadVisualization();
+  }
+
+  Future<void> _loadVisualization() async {
+    setState(() => _loading = true);
+    try {
+      final response = await http.post(
+        Uri.parse('http://localhost:8000/api/firewall/visualize'),
+        headers: {'Content-Type': 'application/json'},
+        body: '{}',
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        setState(() {
+          _visualizationImage = data['image'];
+          _loading = false;
+        });
+      } else {
+        setState(() => _loading = false);
+        _showMessage('Failed to load visualization');
+      }
+    } catch (e) {
+      setState(() => _loading = false);
+      _showMessage('Error: $e');
+    }
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: Colors.blue),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        children: [
+          Card(
+            color: Colors.grey[900],
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  const Text(
+                    'Firewall Visualization',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.cyanAccent,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  ElevatedButton(
+                    onPressed: _loadVisualization,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.cyan,
+                      foregroundColor: Colors.black,
+                    ),
+                    child: const Text('Refresh Visualization'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
+          Expanded(
+            child: Card(
+              color: Colors.grey[900],
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Center(
+                  child:
+                      _loading
+                          ? const Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              CircularProgressIndicator(
+                                color: Colors.cyanAccent,
+                              ),
+                              SizedBox(height: 16),
+                              Text('Loading visualization...'),
+                            ],
+                          )
+                          : _visualizationImage == null
+                          ? const Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.image_not_supported,
+                                size: 64,
+                                color: Colors.grey,
+                              ),
+                              SizedBox(height: 16),
+                              Text('Visualization not available'),
+                            ],
+                          )
+                          : Image.network(
+                            _visualizationImage!,
+                            fit: BoxFit.contain,
+                          ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
