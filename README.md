@@ -14,6 +14,7 @@ Service Detection: Automatic identification of common services
 
 Custom Port Input: Support for formats like 80,443, 20-30, 80,443,20-25,8080, or all
 
+
 🛡️ Firewall Simulator
 Rule Management: Add, edit, delete firewall rules with priority system
 
@@ -23,12 +24,14 @@ Packet Testing: Test packets against firewall rules in real-time
 
 Priority-based Evaluation: Rules evaluated based on priority (1-1000)
 
+
 📊 Real-time Visualization
 Interactive Graph: Visual representation of firewall rules and traffic flow
 
 Color-coded Nodes: Different colors for allow/deny rules and packet paths
 
 Live Updates: Visualization updates as rules change
+
 
 💻 Modern UI/UX
 Cross-platform: Flutter-based frontend for desktop and mobile
@@ -38,6 +41,7 @@ Dark Theme: Professional dark interface with neon accents
 Responsive Design: Adapts to different screen sizes
 
 Real-time Feedback: Live scanning progress and results
+
 
 🏗️ Architecture
 text
@@ -57,6 +61,8 @@ text
 │                 │                 │  Firewall Sim   │
 │                 │                 │  Visualization  │
 └─────────────────┘                 └─────────────────┘
+
+
 📦 Installation
 Backend Setup (FastAPI)
 bash
@@ -123,6 +129,8 @@ response = requests.post("http://localhost:8000/api/firewall/test", json={
     "port": 80,
     "protocol": "tcp"
 })
+
+
 🔧 API Endpoints
 Method	Endpoint	Description
 GET	/api/health	Health check and system status
